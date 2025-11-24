@@ -113,15 +113,31 @@ func generateHaozPaySignature(privateKeyPEM string, params map[string]string) (s
 }
 
 // parsePrivateKey 解析PEM格式的私钥
+// 支持两种格式:
+//   1. 完整的 PEM 格式(带 -----BEGIN/END----- 标志)
+//   2. 纯 Base64 编码的密钥字符串(不带标志)
 func parsePrivateKey(privateKeyPEM string) (*rsa.PrivateKey, error) {
+	var keyBytes []byte
+
+	// 尝试 PEM 解码
 	block, _ := pem.Decode([]byte(privateKeyPEM))
-	if block == nil {
-		return nil, fmt.Errorf("failed to decode PEM block")
+	if block != nil {
+		// PEM 格式
+		keyBytes = block.Bytes
+	} else {
+		// 可能是纯 Base64 格式，尝试直接解码
+		decoded, err := base64.StdEncoding.DecodeString(privateKeyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode private key: not valid PEM or Base64 format")
+		}
+		keyBytes = decoded
 	}
 
-	privateKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	// 尝试解析为 PKCS8 格式
+	privateKey, err := x509.ParsePKCS8PrivateKey(keyBytes)
 	if err != nil {
-		privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+		// 尝试解析为 PKCS1 格式
+		privateKey, err = x509.ParsePKCS1PrivateKey(keyBytes)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse private key: %w", err)
 		}
@@ -203,16 +219,16 @@ func encryptWithPrivateKey(privateKey *rsa.PrivateKey, data []byte) ([]byte, err
 	if c.Cmp(privateKey.N) >= 0 {
 		return nil, fmt.Errorf("message too long")
 	}
-	
+
 	// 使用私钥的 D 和 N 进行模幂运算: m = c^d mod n
 	m := new(big.Int).Exp(c, privateKey.D, privateKey.N)
-	
+
 	// 补齐到密钥长度
 	keySize := (privateKey.N.BitLen() + 7) / 8
 	result := make([]byte, keySize)
 	mBytes := m.Bytes()
 	copy(result[keySize-len(mBytes):], mBytes)
-	
+
 	return result, nil
 }
 
@@ -224,22 +240,36 @@ func decryptWithPublicKey(publicKey *rsa.PublicKey, data []byte) ([]byte, error)
 	if c.Cmp(publicKey.N) >= 0 {
 		return nil, fmt.Errorf("message too long")
 	}
-	
+
 	// 使用公钥的 E 和 N 进行模幂运算: m = c^e mod n
 	m := new(big.Int).Exp(c, big.NewInt(int64(publicKey.E)), publicKey.N)
-	
+
 	// 去除前导零，返回原始数据
 	return m.Bytes(), nil
 }
 
 // parsePublicKey 解析PEM格式的公钥
+// 支持两种格式:
+//   1. 完整的 PEM 格式(带 -----BEGIN/END----- 标志)
+//   2. 纯 Base64 编码的密钥字符串(不带标志)
 func parsePublicKey(publicKeyPEM string) (*rsa.PublicKey, error) {
+	var keyBytes []byte
+
+	// 尝试 PEM 解码
 	block, _ := pem.Decode([]byte(publicKeyPEM))
-	if block == nil {
-		return nil, fmt.Errorf("failed to decode PEM block")
+	if block != nil {
+		// PEM 格式
+		keyBytes = block.Bytes
+	} else {
+		// 可能是纯 Base64 格式，尝试直接解码
+		decoded, err := base64.StdEncoding.DecodeString(publicKeyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode public key: not valid PEM or Base64 format")
+		}
+		keyBytes = decoded
 	}
 
-	pubInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
+	pubInterface, err := x509.ParsePKIXPublicKey(keyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse public key: %w", err)
 	}
@@ -267,7 +297,7 @@ func errorHandlerMiddleware() resty.ResponseMiddleware {
 		// 检查是否为错误状态码
 		if r.StatusCode() >= 400 {
 			var errResp Response
-			
+
 			// 尝试解析错误响应
 			if err := json.Unmarshal(r.Body(), &errResp); err != nil {
 				// 解析失败时返回通用错误
@@ -277,7 +307,7 @@ func errorHandlerMiddleware() resty.ResponseMiddleware {
 					r.StatusCode(),
 				)
 			}
-			
+
 			// 返回包含详细信息的 SDK 错误
 			return NewSDKErrorWithRequestID(
 				errResp.Code,
@@ -307,7 +337,7 @@ func requestLogMiddleware(debug bool) resty.RequestMiddleware {
 		if debug {
 			// 打印请求行
 			fmt.Printf("[SDK Request] %s %s\n", r.Method, r.URL)
-			
+
 			// 打印请求体
 			if r.Body != nil {
 				bodyBytes, _ := json.MarshalIndent(r.Body, "", "  ")
@@ -335,9 +365,9 @@ func responseLogMiddleware(debug bool) resty.ResponseMiddleware {
 	return func(c *resty.Client, r *resty.Response) error {
 		if debug {
 			// 打印响应状态和耗时
-			fmt.Printf("[SDK Response] Status: %d, Time: %v\n", 
+			fmt.Printf("[SDK Response] Status: %d, Time: %v\n",
 				r.StatusCode(), r.Time())
-			
+
 			// 打印响应体
 			fmt.Printf("[SDK Response Body] %s\n", string(r.Body()))
 		}
